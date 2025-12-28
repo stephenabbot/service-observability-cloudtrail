@@ -1,0 +1,16 @@
+# AWS temporary credentials
+.aws/
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CloudFormation outputs
+cloudformation-outputs.json

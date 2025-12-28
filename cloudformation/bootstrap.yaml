@@ -1,0 +1,468 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS CloudTrail Governance Foundation - Foundational audit logging infrastructure'
+
+Parameters:
+  # Standard Tags
+  AccountId:
+    Type: String
+    Description: AWS Account ID
+  AccountAlias:
+    Type: String
+    Description: AWS Account Alias
+    Default: ''
+  CostCenter:
+    Type: String
+    Description: Cost allocation identifier
+    Default: 'default'
+  Environment:
+    Type: String
+    Description: Environment identifier
+    AllowedValues: [prd, stg, tst, dev]
+  Owner:
+    Type: String
+    Description: Resource owner identifier
+  Project:
+    Type: String
+    Description: Project name
+  Repository:
+    Type: String
+    Description: Git repository URL
+  Region:
+    Type: String
+    Description: AWS region
+  ManagedBy:
+    Type: String
+    Description: Management method
+    Default: 'CloudFormation'
+  DeploymentRole:
+    Type: String
+    Description: IAM principal used for deployment
+
+  # CloudTrail Configuration
+  IsMultiRegion:
+    Type: String
+    Description: Enable multi-region trail
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  IncludeManagementEvents:
+    Type: String
+    Description: Capture management events
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  IncludeDataEvents:
+    Type: String
+    Description: Capture data events
+    AllowedValues: ['true', 'false']
+    Default: 'false'
+  EventSelectors:
+    Type: String
+    Description: Event types to capture
+    AllowedValues: [WriteOnly, ReadOnly, All]
+    Default: 'WriteOnly'
+
+  # CloudWatch Logs Configuration
+  EnableCloudWatchLogs:
+    Type: String
+    Description: Stream events to CloudWatch Logs
+    AllowedValues: ['true', 'false']
+    Default: 'true'
+  RetentionDays:
+    Type: Number
+    Description: CloudWatch Logs retention period
+    Default: 90
+
+  # S3 Lifecycle Configuration
+  IntelligentTieringDays:
+    Type: Number
+    Description: Days before Intelligent-Tiering transition
+    Default: 0
+  GlacierTransitionDays:
+    Type: Number
+    Description: Days before Glacier IA transition
+    Default: 90
+  ExpirationDays:
+    Type: Number
+    Description: Days before object expiration
+    Default: 2555
+
+Conditions:
+  EnableCloudWatchLogsCondition: !Equals [!Ref EnableCloudWatchLogs, 'true']
+  HasAccountAlias: !Not [!Equals [!Ref AccountAlias, '']]
+  IncludeDataEventsCondition: !Equals [!Ref IncludeDataEvents, 'true']
+
+Resources:
+  # S3 Bucket for CloudTrail Logs
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub 'governance-cloudtrail-${AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: IntelligentTiering
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: !Ref IntelligentTieringDays
+                StorageClass: INTELLIGENT_TIERING
+          - Id: GlacierTransition
+            Status: Enabled
+            Transitions:
+              - TransitionInDays: !Ref GlacierTransitionDays
+                StorageClass: GLACIER_IR
+          - Id: Expiration
+            Status: Enabled
+            ExpirationInDays: !Ref ExpirationDays
+      Tags:
+        - Key: AccountId
+          Value: !Ref AccountId
+        - Key: AccountAlias
+          Value: !Ref AccountAlias
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: DeploymentRole
+          Value: !Ref DeploymentRole
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: !Ref ManagedBy
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+        - Key: Region
+          Value: !Ref Region
+        - Key: Repository
+          Value: !Ref Repository
+        - Key: IsMultiRegion
+          Value: !Ref IsMultiRegion
+        - Key: IncludeDataEvents
+          Value: !Ref IncludeDataEvents
+
+  # S3 Bucket Policy
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudTrailBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AWSCloudTrailAclCheck
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt CloudTrailBucket.Arn
+            Condition:
+              StringEquals:
+                'AWS:SourceAccount': !Ref AccountId
+          - Sid: AWSCloudTrailWrite
+            Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${CloudTrailBucket.Arn}/AWSLogs/${AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                'AWS:SourceAccount': !Ref AccountId
+
+  # CloudWatch Log Group (Conditional)
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Condition: EnableCloudWatchLogsCondition
+    Properties:
+      LogGroupName: governance-cloudtrail-logs
+      RetentionInDays: !Ref RetentionDays
+      Tags:
+        - Key: AccountId
+          Value: !Ref AccountId
+        - Key: AccountAlias
+          Value: !Ref AccountAlias
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: DeploymentRole
+          Value: !Ref DeploymentRole
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: !Ref ManagedBy
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+        - Key: Region
+          Value: !Ref Region
+        - Key: Repository
+          Value: !Ref Repository
+
+  # IAM Role for CloudWatch Logs (Conditional)
+  CloudTrailLogsRole:
+    Type: AWS::IAM::Role
+    Condition: EnableCloudWatchLogsCondition
+    Properties:
+      RoleName: !Sub 'governance-cloudtrail-cw-logs-${AccountId}-${Region}'
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudTrailLogsPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !GetAtt CloudTrailLogGroup.Arn
+      Tags:
+        - Key: AccountId
+          Value: !Ref AccountId
+        - Key: AccountAlias
+          Value: !Ref AccountAlias
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: DeploymentRole
+          Value: !Ref DeploymentRole
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: !Ref ManagedBy
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+        - Key: Region
+          Value: !Ref Region
+        - Key: Repository
+          Value: !Ref Repository
+
+  # CloudTrail Trail
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      TrailName: governance-cloudtrail-trail
+      S3BucketName: !Ref CloudTrailBucket
+      IsMultiRegionTrail: !Ref IsMultiRegion
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+      EnableLogFileValidation: true
+      CloudWatchLogsLogGroupArn: !If
+        - EnableCloudWatchLogsCondition
+        - !GetAtt CloudTrailLogGroup.Arn
+        - !Ref AWS::NoValue
+      CloudWatchLogsRoleArn: !If
+        - EnableCloudWatchLogsCondition
+        - !GetAtt CloudTrailLogsRole.Arn
+        - !Ref AWS::NoValue
+      EventSelectors:
+        - ReadWriteType: !Ref EventSelectors
+          IncludeManagementEvents: !Ref IncludeManagementEvents
+          DataResources: !If
+            - IncludeDataEventsCondition
+            - - Type: AWS::S3::Object
+                Values: ['arn:aws:s3:::*/*']
+              - Type: AWS::Lambda::Function
+                Values: ['arn:aws:lambda:*:*:function:*']
+            - !Ref AWS::NoValue
+      Tags:
+        - Key: AccountId
+          Value: !Ref AccountId
+        - Key: AccountAlias
+          Value: !Ref AccountAlias
+        - Key: CostCenter
+          Value: !Ref CostCenter
+        - Key: DeploymentRole
+          Value: !Ref DeploymentRole
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: ManagedBy
+          Value: !Ref ManagedBy
+        - Key: Owner
+          Value: !Ref Owner
+        - Key: Project
+          Value: !Ref Project
+        - Key: Region
+          Value: !Ref Region
+        - Key: Repository
+          Value: !Ref Repository
+        - Key: IsMultiRegion
+          Value: !Ref IsMultiRegion
+        - Key: IncludeDataEvents
+          Value: !Ref IncludeDataEvents
+
+  # SSM Parameters
+  SSMTrailName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /governance/cloudtrail/trail-name
+      Type: String
+      Value: !Ref CloudTrail
+      Description: CloudTrail trail name
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+  SSMTrailArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /governance/cloudtrail/trail-arn
+      Type: String
+      Value: !GetAtt CloudTrail.Arn
+      Description: CloudTrail trail ARN
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+  SSMS3BucketName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /governance/cloudtrail/s3-bucket-name
+      Type: String
+      Value: !Ref CloudTrailBucket
+      Description: S3 bucket name for CloudTrail logs
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+  SSMS3BucketArn:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /governance/cloudtrail/s3-bucket-arn
+      Type: String
+      Value: !GetAtt CloudTrailBucket.Arn
+      Description: S3 bucket ARN for CloudTrail logs
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+  SSMLogGroupName:
+    Type: AWS::SSM::Parameter
+    Condition: EnableCloudWatchLogsCondition
+    Properties:
+      Name: /governance/cloudtrail/log-group-name
+      Type: String
+      Value: !Ref CloudTrailLogGroup
+      Description: CloudWatch Log Group name
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+  SSMLogGroupArn:
+    Type: AWS::SSM::Parameter
+    Condition: EnableCloudWatchLogsCondition
+    Properties:
+      Name: /governance/cloudtrail/log-group-arn
+      Type: String
+      Value: !GetAtt CloudTrailLogGroup.Arn
+      Description: CloudWatch Log Group ARN
+      Tags:
+        AccountId: !Ref AccountId
+        AccountAlias: !Ref AccountAlias
+        CostCenter: !Ref CostCenter
+        DeploymentRole: !Ref DeploymentRole
+        Environment: !Ref Environment
+        ManagedBy: !Ref ManagedBy
+        Owner: !Ref Owner
+        Project: !Ref Project
+        Region: !Ref Region
+        Repository: !Ref Repository
+
+Outputs:
+  TrailName:
+    Description: CloudTrail trail name
+    Value: !Ref CloudTrail
+    Export:
+      Name: !Sub '${AWS::StackName}-TrailName'
+
+  TrailArn:
+    Description: CloudTrail trail ARN
+    Value: !GetAtt CloudTrail.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-TrailArn'
+
+  S3BucketName:
+    Description: S3 bucket name
+    Value: !Ref CloudTrailBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketName'
+
+  S3BucketArn:
+    Description: S3 bucket ARN
+    Value: !GetAtt CloudTrailBucket.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-S3BucketArn'
+
+  LogGroupName:
+    Condition: EnableCloudWatchLogsCondition
+    Description: CloudWatch Log Group name
+    Value: !Ref CloudTrailLogGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupName'
+
+  LogGroupArn:
+    Condition: EnableCloudWatchLogsCondition
+    Description: CloudWatch Log Group ARN
+    Value: !GetAtt CloudTrailLogGroup.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LogGroupArn'
+
+  StackName:
+    Description: CloudFormation stack name
+    Value: !Ref AWS::StackName
+    Export:
+      Name: !Sub '${AWS::StackName}-StackName'
